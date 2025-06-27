@@ -27,13 +27,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-try:
-    from obspy_phasenet import phasenet as pn  # type: ignore
-    HAS_PHASENET = True
-except Exception:
-    HAS_PHASENET = False
+# ---------------------------------------------------------------------------
+# PhaseNet model (via SeisBench)
+# ---------------------------------------------------------------------------
+# We load a pretrained PhaseNet picker via the SeisBench model zoo.  On first
+# use, the weight file (~30 MB) is downloaded and cached by SeisBench.  If the
+# package is not available the app will fall back to TauP-only estimates.
 
 try:
+<<<<<<< HEAD
     from seisbench.models import PhaseNet as SBPhaseNet  # type: ignore
     HAS_SEISBENCH = True
 except Exception:
@@ -44,6 +46,19 @@ if HAS_PHASENET:
     logger.info("🤖 PhaseNet available – ML phase picking enabled.")
 else:
     logger.warning("⚠️  PhaseNet NOT available – falling back to TauP estimates.")
+=======
+    import seisbench.models as sbm  # type: ignore
+
+    # "geofon" weights are small (~30 MB) and tuned for global broadband data.
+    # Feel free to switch to a different pretrained set (see list_pretrained()).
+    PN_MODEL = sbm.PhaseNet.from_pretrained("geofon")
+    HAS_PHASENET = True
+    logger.info("🤖 PhaseNet (SeisBench) loaded – ML phase picking enabled.")
+except Exception as e:  # pragma: no cover – missing optional dep
+    HAS_PHASENET = False
+    PN_MODEL = None  # type: ignore
+    logger.warning(f"⚠️  PhaseNet via SeisBench NOT available – reason: {e}")
+>>>>>>> c795fa4 (Integrate SeisBench PhaseNet Model for Enhanced Phase Picking)
 
 if HAS_SEISBENCH:
     logger.info("🤖 SeisBench available – advanced models enabled.")
@@ -538,6 +553,7 @@ def create_app():
             station_map = gr.Plot(label="Station Map")
         with gr.Row():
             plot_output = gr.Plot(label="Waveform Plot (with phases)")
+            phasenet_plot = gr.Plot(label="PhaseNet Picks")
             data_info = gr.Textbox(label="Data Information", lines=8, interactive=False)
         # State variables
         event_list_state = gr.State([])
@@ -640,7 +656,7 @@ def create_app():
         # Waveform fetch callback
         def fetch_waveform(selected_event, station, bandpass_min, bandpass_max, highpass):
             if not selected_event or not station:
-                return None, "Please select an event and station first."
+                return None, None, "Please select an event and station first."
             
             logger.info(f"📊 Fetching waveform for event: {selected_event['Time']}, station: {station}")
             
@@ -653,26 +669,28 @@ def create_app():
                 end_time = dt + 300   # 5 minutes after
             except Exception as e:
                 logger.error(f"Error parsing event time: {e}")
-                return None, f"Error parsing event time: {e}"
+                return None, None, f"Error parsing event time: {e}"
             
             # Fetch waveform data
             scedc = SCEDCInterface()
+            # Retrieve three-component broadband data for PhaseNet (Z,N,E)
             st = scedc.get_waveform_data(
                 start_time.isoformat(),
                 end_time.isoformat(),
-                "CI",  # Network
+                "CI",               # Network
                 station,
-                "BHZ"  # Channel
+                "BH?"               # Channel pattern -> BHZ, BHN, BHE
             )
             
             if st is None:
-                return None, f"No waveform data available for {station}"
+                return None, None, f"No waveform data available for {station}"
             
             # TauP arrivals as reference
             taup_arrs = compute_phase_arrivals(selected_event["Raw"], "CI", station)
 
             # Try SeisBench classification first
             phase_arrs: list[dict] = []
+<<<<<<< HEAD
             if HAS_SEISBENCH:
                 phase_arrs = compute_seisbench_arrivals(st)
 
@@ -699,6 +717,32 @@ def create_app():
             if fig is None:
                 return None, "Error creating waveform plot"
 
+=======
+            picks_for_plot = []
+            if HAS_PHASENET:
+                phase_arrs = compute_phasenet_arrivals(
+                    st,
+                    selected_event['Raw'],
+                    selected_event['Raw'].get('Network'),
+                    selected_event['Raw'].get('Station'),
+                )
+                # Run a second time (cheap) to collect all raw picks for plotting
+                try:
+                    classify_out = PN_MODEL.classify(st, batch_size=64)
+                    picks_for_plot = getattr(classify_out, "picks", [])
+                except Exception as e:
+                    logger.error(f"PhaseNet classify error for plotting: {e}")
+
+            # Create plot with custom filter parameters
+            fig = plot_waveform(st, phase_arrivals=phase_arrs, event_time=event_time, station=station)
+            
+            # Build separate PhaseNet picks figure
+            picks_fig = plot_phasenet_picks(picks_for_plot, st, selected_event['Raw']) if picks_for_plot else None
+            
+            if fig is None:
+                return None, None, "Error creating waveform plot"
+            
+>>>>>>> c795fa4 (Integrate SeisBench PhaseNet Model for Enhanced Phase Picking)
             # Create info text
             info = f"Event: {event_time}\n"
             info += f"Station: {station}\n"
@@ -707,15 +751,20 @@ def create_app():
             info += f"Time window: {start_time} to {end_time}\n"
             info += f"Filters: Bandpass {bandpass_min}-{bandpass_max} Hz, Highpass {highpass} Hz\n"
             info += f"Traces: {len(st)}"
+<<<<<<< HEAD
             if delta_lines:
                 info += "\n" + "; ".join(delta_lines)
 
             return fig, info
+=======
+            
+            return fig, picks_fig, info
+>>>>>>> c795fa4 (Integrate SeisBench PhaseNet Model for Enhanced Phase Picking)
         
         fetch_waveform_btn.click(
             fetch_waveform,
             inputs=[selected_event_state, station_dropdown, bandpass_min, bandpass_max, highpass],
-            outputs=[plot_output, data_info]
+            outputs=[plot_output, phasenet_plot, data_info]
         )
     
     logger.info("✅ Next-gen SCEDC Gradio app with event selection ready.")
@@ -764,52 +813,76 @@ def compute_phase_arrivals(event_raw: dict, network: str, station: str):
 # ---------------------------------------------------------------------------
 
 def compute_phasenet_arrivals(st, event_raw: dict | None, network: str | None, station: str | None):
-    """Run PhaseNet picker and keep P/S picks near TauP estimates (±4 s)."""
-    if not HAS_PHASENET:
-        logger.info("PhaseNet not installed; skipping ML picks.")
+    """Run PhaseNet picker (SeisBench) and filter picks close to TauP estimates (±4 s).
+
+    Returns a list of dicts::
+        [{"phase": "P", "time": 12.3, "abs_time": "12.3s"}, ...]
+    """
+
+    if not HAS_PHASENET or PN_MODEL is None:
+        logger.info("PhaseNet not available; skipping ML picks.")
         return []
 
+    # If event + station metadata present, compute theoretical arrivals for pruning
+    taup_dict: dict[str, float]
     if event_raw and network and station:
         taup_arrs = compute_phase_arrivals(event_raw, network, station)
         taup_dict = {a["phase"].upper(): a["time"] for a in taup_arrs}
     else:
         taup_dict = {}
 
+    # Determine event origin time (UTCDateTime); needed to derive relative seconds
+    if event_raw and event_raw.get("Time"):
+        try:
+            origin_time = UTCDateTime(event_raw["Time"])
+        except Exception:
+            origin_time = None
+    else:
+        origin_time = None
+
     try:
-        logger.info("🔮 Running PhaseNet picker...")
-        picks = pn.stream_predict(st, batch_size=20)
-        logger.info(f"🔮 PhaseNet returned {len(picks)} raw picks")
+        logger.info("🔮 Running PhaseNet (SeisBench) picker …")
+        # SeisBench models accept obspy.Stream directly
+        classify_out = PN_MODEL.classify(st, batch_size=64)
+        picks_list = getattr(classify_out, "picks", [])
+        logger.info(f"🔮 PhaseNet produced {len(picks_list)} picks")
 
-        ref_time_trace = st[0].stats.starttime
-        # Event origin relative to trace start is 60 s (see fetch_waveform window)
-        origin_rel_in_trace = 60.0
+        tolerance = 4.0  # seconds window around TauP prediction
+        selected: dict[str, dict] = {}
 
-        selected = {}
-        tolerance = 4.0  # seconds around TauP
-
-        for p in picks:
-            phase = (p.phase_hint or "").upper()
+        for p in picks_list:
+            phase = (p.phase or "").upper()
             if phase not in ("P", "S"):
                 continue
-            rel_trace = p.time - ref_time_trace  # sec since trace start
-            rel_event = rel_trace - origin_rel_in_trace  # sec since event origin
-            logger.debug(f"      pick: phase={phase} rel_event={rel_event:.2f}s")
 
-            if phase in taup_dict:
-                if abs(rel_event - taup_dict[phase]) > tolerance:
-                    continue  # outside acceptable window
-            # keep the first (earliest) valid pick per phase
+            # Compute time relative to event origin (if known) else trace start offset
+            if origin_time is not None and p.peak_time is not None:
+                rel_event = p.peak_time - origin_time
+            else:
+                # Fall back to difference to trace start minus 60 s window offset
+                rel_event = (p.peak_time - st[0].stats.starttime) - 60.0  # type: ignore
+
+            if phase in taup_dict and abs(rel_event - taup_dict[phase]) > tolerance:
+                continue  # Discard outliers beyond tolerance
+
             if phase not in selected or rel_event < selected[phase]["time"]:
-                selected[phase] = {"phase": phase, "time": rel_event, "abs_time": f"{rel_event:.1f}s"}
+                selected[phase] = {
+                    "phase": phase,
+                    "time": float(rel_event),
+                    "abs_time": f"{rel_event:.1f}s",
+                }
 
         arrivals = list(selected.values())
-        logger.info(f"🔮 PhaseNet filtered to {len(arrivals)} picks within ±{tolerance}s of TauP")
+        logger.info(
+            f"🔮 PhaseNet filtered to {len(arrivals)} pick(s) within ±{tolerance}s of TauP"
+        )
         return arrivals
     except Exception as e:
         logger.error(f"PhaseNet picking error: {e}")
         return []
 
 # ---------------------------------------------------------------------------
+<<<<<<< HEAD
 # SeisBench PhaseNet picker (if available)
 # ---------------------------------------------------------------------------
 
@@ -833,6 +906,59 @@ def compute_seisbench_arrivals(st):
     except Exception as e:
         logger.error(f"SeisBench classification error: {e}")
         return []
+=======
+# Helper to visualise raw PhaseNet picks
+# ---------------------------------------------------------------------------
+
+def plot_phasenet_picks(picks: list, st, event_raw: dict | None):
+    """Return a Matplotlib figure of PhaseNet pick times per phase."""
+
+    try:
+        import matplotlib.pyplot as plt
+
+        # Determine reference origin time (UTCDateTime)
+        if event_raw and event_raw.get("Time"):
+            try:
+                origin_time = UTCDateTime(event_raw["Time"])
+            except Exception:
+                origin_time = None
+        else:
+            origin_time = None
+
+        xs_p, xs_s = [], []
+        for p in picks:
+            phase = (p.phase or "").upper()
+            if phase not in ("P", "S"):
+                continue
+
+            if origin_time is not None and p.peak_time is not None:
+                t_rel = p.peak_time - origin_time
+            else:
+                t_rel = (p.peak_time - st[0].stats.starttime) - 60.0  # type: ignore
+
+            if phase == "P":
+                xs_p.append(float(t_rel))
+            else:
+                xs_s.append(float(t_rel))
+
+        fig, ax = plt.subplots(figsize=(12, 2))
+        if xs_p:
+            ax.eventplot(xs_p, lineoffsets=1, colors="red", linewidths=2, label="P picks")
+        if xs_s:
+            ax.eventplot(xs_s, lineoffsets=0, colors="blue", linewidths=2, label="S picks")
+
+        ax.set_yticks([0, 1])
+        ax.set_yticklabels(["S", "P"])
+        ax.set_xlabel("Time (s from event origin)")
+        ax.set_title("PhaseNet predicted pick times")
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        plt.tight_layout()
+        return fig
+    except Exception as e:
+        logger.error(f"Error plotting PhaseNet picks: {e}")
+        return None
+>>>>>>> c795fa4 (Integrate SeisBench PhaseNet Model for Enhanced Phase Picking)
 
 if __name__ == "__main__":
     logger.info("🌍 Starting SCEDC Interactive Gradio App...")
