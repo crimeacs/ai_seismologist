@@ -15,7 +15,7 @@ from obspy.geodetics import locations2degrees
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import plotly.graph_objs as go
+import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import xml.etree.ElementTree as ET
 
@@ -455,154 +455,266 @@ def create_station_map(stations, event_lat, event_lon):
     return fig
 
 def create_app():
-    logger.info("🚀 Creating next-gen SCEDC Gradio app with map, timeline, and filters...")
-    with gr.Blocks(theme=gr.themes.Monochrome(), css="""
-        .gr-box {background: #f8fafc; border-radius: 12px; box-shadow: 0 2px 8px #0001;}
-        .section-header {font-size: 1.3em; font-weight: bold; margin: 1em 0 0.5em 0; color: #2b4162;}
-        .gr-button {font-size: 1.1em;}
-        .gr-textbox, .gr-number {margin-bottom: 0.5em;}
-    """) as app:
-        gr.Markdown("""
-        <div style='text-align:center; margin-bottom:1em;'>
-        <span style='font-size:2em;'>🌍 <b>SCEDC Interactive Seismic Explorer</b></span><br>
-        <span style='color:#2b4162;'>Search, visualize, and explore Southern California earthquakes</span>
+    """Create and configure the Gradio application"""
+    logger.info("🚀 Creating Gradio app interface...")
+    
+    # Custom CSS for better styling
+    custom_css = """
+    .gradio-container {
+        max-width: 1400px !important;
+        margin: 0 auto !important;
+    }
+    .plot-container {
+        min-height: 500px;
+    }
+    .info-panel {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        border-radius: 10px;
+        padding: 15px;
+    }
+    """
+    
+    with gr.Blocks(
+        title="🌍 SCEDC Seismic Data Explorer", 
+        theme=gr.themes.Soft(),
+        css=custom_css
+    ) as app:
+        
+        # Header
+        gr.HTML("""
+        <div style="text-align: center; padding: 20px; background: linear-gradient(90deg, #4CAF50, #2196F3); border-radius: 15px; margin-bottom: 20px;">
+            <h1 style="color: white; margin: 0; font-size: 2.5em;">🌍 SCEDC Seismic Data Explorer</h1>
+            <p style="color: white; margin: 10px 0 0 0; font-size: 1.2em;">Interactive earthquake analysis with PhaseNet ML picking</p>
         </div>
         """)
-        with gr.Row():
-            with gr.Column():
-                gr.Markdown("<div class='section-header'>🔎 Event Search</div>")
-                start_date = gr.Textbox(label="Start Date (YYYY-MM-DD)", value="2024-12-01")
-                end_date = gr.Textbox(label="End Date (YYYY-MM-DD)", value="2024-12-31")
-                min_mag = gr.Number(label="Minimum Magnitude", value=3.0, minimum=0.0, maximum=10.0)
-                max_mag = gr.Number(label="Maximum Magnitude", value=None, minimum=0.0, maximum=10.0)
-                search_btn = gr.Button("🔍 Search Events", variant="primary")
-                search_status = gr.Textbox(label="Status", interactive=False)
-            with gr.Column():
-                gr.Markdown("<div class='section-header'>⚙️ Waveform Filter Controls</div>")
-                bandpass_min = gr.Number(label="Bandpass Min (Hz)", value=0.1)
-                bandpass_max = gr.Number(label="Bandpass Max (Hz)", value=10.0)
-                highpass = gr.Number(label="Highpass (Hz)", value=0.5)
-        with gr.Row():
-            with gr.Column():
-                gr.Markdown("<div class='section-header'>📋 Event Selection</div>")
-                event_dropdown = gr.Dropdown(label="Select Event", choices=[], value=None, interactive=True, allow_custom_value=False)
-            with gr.Column():
-                gr.Markdown("<div class='section-header'>📍 Station Selection</div>")
-                station_dropdown = gr.Dropdown(label="Select Station", choices=[], value=None, interactive=True, allow_custom_value=False)
-                fetch_waveform_btn = gr.Button("📊 Fetch Waveform", variant="primary")
-        with gr.Row():
-            with gr.Column():
-                gr.Markdown("<div class='section-header'>🗺️ Event Map</div>")
-                event_map = gr.Plot(label=None)
-            with gr.Column():
-                gr.Markdown("<div class='section-header'>📈 Event Timeline</div>")
-                event_timeline = gr.Plot(label=None)
-        with gr.Row():
-            station_map = gr.Plot(label="Station Map")
-        with gr.Row():
-            plot_output = gr.Plot(label="Waveform Plot (with phases)")
-            phasenet_plot = gr.Plot(label="PhaseNet Picks")
-            phasenet_prob_plot = gr.Plot(label="PhaseNet Probabilities")
-            phasenet_debug = gr.Textbox(label="PhaseNet Raw Picks", lines=8, interactive=False)
-            data_info = gr.Textbox(label="Data Information", lines=8, interactive=False)
-        # State variables
-        event_list_state = gr.State([])
+        
+        with gr.Tabs():
+            # ==== EVENT SEARCH TAB ====
+            with gr.Tab("🔍 Event Search", elem_id="search-tab"):
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        gr.HTML("<h3>🗓️ Search Parameters</h3>")
+                        with gr.Group():
+                            start_date = gr.Textbox(
+                                label="Start Date (YYYY-MM-DD)", 
+                                value="2024-12-20",
+                                info="Search from this date"
+                            )
+                            end_date = gr.Textbox(
+                                label="End Date (YYYY-MM-DD)", 
+                                value="2024-12-27",
+                                info="Search until this date"
+                            )
+                            with gr.Row():
+                                min_magnitude = gr.Number(
+                                    label="Min Magnitude", 
+                                    value=3.0, 
+                                    minimum=0.0, 
+                                    maximum=10.0
+                                )
+                                max_magnitude = gr.Number(
+                                    label="Max Magnitude", 
+                                    value=8.0, 
+                                    minimum=0.0, 
+                                    maximum=10.0
+                                )
+                            search_btn = gr.Button("🔍 Search Events", variant="primary", size="lg")
+                    
+                    with gr.Column(scale=2):
+                        gr.HTML("<h3>🗺️ Event Map</h3>")
+                        event_map = gr.Plot(label="Event Locations", elem_classes=["plot-container"])
+                
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        gr.HTML("<h3>📋 Events Found</h3>")
+                        event_dropdown = gr.Dropdown(
+                            label="Select Event", 
+                            choices=[], 
+                            interactive=True,
+                            info="Choose an earthquake to analyze"
+                        )
+                        event_info = gr.HTML(elem_classes=["info-panel"])
+                    
+                    with gr.Column(scale=2):
+                        gr.HTML("<h3>📈 Event Timeline</h3>")
+                        event_timeline = gr.Plot(label="Events Over Time", elem_classes=["plot-container"])
+            
+            # ==== WAVEFORM ANALYSIS TAB ====
+            with gr.Tab("📊 Waveform Analysis", elem_id="waveform-tab"):
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        gr.HTML("<h3>🎛️ Analysis Controls</h3>")
+                        with gr.Group():
+                            station_dropdown = gr.Dropdown(
+                                label="Recording Station", 
+                                choices=[], 
+                                interactive=True,
+                                info="Select seismic station"
+                            )
+                            gr.HTML("<h4>🔧 Filter Settings</h4>")
+                            with gr.Row():
+                                bandpass_min = gr.Number(
+                                    label="Bandpass Min (Hz)", 
+                                    value=0.1, 
+                                    minimum=0.01, 
+                                    maximum=50.0
+                                )
+                                bandpass_max = gr.Number(
+                                    label="Bandpass Max (Hz)", 
+                                    value=10.0, 
+                                    minimum=0.1, 
+                                    maximum=50.0
+                                )
+                            highpass = gr.Number(
+                                label="Highpass (Hz)", 
+                                value=0.5, 
+                                minimum=0.01, 
+                                maximum=10.0
+                            )
+                            fetch_waveform_btn = gr.Button("📊 Analyze Waveform", variant="primary", size="lg")
+                    
+                    with gr.Column(scale=2):
+                        gr.HTML("<h3>🗺️ Station Map</h3>")
+                        station_map = gr.Plot(label="Station Locations", elem_classes=["plot-container"])
+                
+                # Main waveform display
+                gr.HTML("<h3>📈 Seismic Waveforms</h3>")
+                waveform_plot = gr.Plot(label="Raw & Filtered Waveforms", elem_classes=["plot-container"], height=600)
+                
+                with gr.Row():
+                    with gr.Column():
+                        gr.HTML("<h4>🤖 PhaseNet ML Picks</h4>")
+                        phasenet_picks_plot = gr.Plot(label="Detected Arrivals", height=200)
+                    with gr.Column():
+                        gr.HTML("<h4>📊 Detection Probabilities</h4>")
+                        phasenet_prob_plot = gr.Plot(label="P & S Wave Probabilities", height=200)
+                
+                with gr.Row():
+                    with gr.Column():
+                        phasenet_debug = gr.Textbox(
+                            label="🔍 Raw Pick Details", 
+                            lines=6, 
+                            interactive=False,
+                            info="Detailed PhaseNet output"
+                        )
+                    with gr.Column():
+                        data_info = gr.Textbox(
+                            label="📋 Waveform Metadata", 
+                            lines=6, 
+                            interactive=False,
+                            info="Technical details about the data"
+                        )
+        
+        # State management
+        events_state = gr.State([])
         selected_event_state = gr.State(None)
-        event_station_map_state = gr.State({})
         
-        # Search callback
-        def do_search(start, end, minm, maxm):
-            events, event_station_map, msg = get_event_station_phase_info(start, end, minm, maxm)
-            if not events:
-                logger.info("No events found, returning empty choices.")
-                return (
-                    msg,
-                    gr.update(choices=[], value=None),
-                    go.Figure(),
-                    go.Figure(),
-                    {},
-                    None,
-                    go.Figure(),
-                    gr.update(choices=[], value=None),
-                    [],
-                )
-            event_choices = []
-            for i, event in enumerate(events):
-                time_str = event['Time']
-                mag = event['Magnitude']
-                location = event['Location']
-                summary = f"{time_str} | M{mag} | {location[:50]}..."
-                event_choices.append(summary)
-            logger.info(f"Event choices for dropdown: {event_choices}")
-            map_fig = create_event_map(events)
-            timeline_fig = create_event_timeline(events)
-            return (
-                f"✓ {len(events)} events loaded",
-                gr.update(choices=event_choices, value=None),
-                map_fig,
-                timeline_fig,
-                event_station_map,
-                None,
-                go.Figure(),
-                gr.update(choices=[], value=None),
-                events,
-            )
-        
-        search_btn.click(
-            do_search,
-            inputs=[start_date, end_date, min_mag, max_mag],
-            outputs=[search_status, event_dropdown, event_map, event_timeline, event_station_map_state, selected_event_state, station_map, station_dropdown, event_list_state]
-        )
-        
-        # Event selection callback
-        def on_event_select(event_choice, events, event_station_map):
-            if not event_choice or not events:
-                return None, [], go.Figure()
-            
-            # Find the selected event by matching the choice string
-            selected_event = None
-            for event in events:
-                time_str = event['Time']
-                mag = event['Magnitude']
-                location = event['Location']
-                summary = f"{time_str} | M{mag} | {location[:50]}..."
-                if summary == event_choice:
-                    selected_event = event
-                    break
-            
-            if not selected_event:
-                return None, [], go.Figure()
-            
-            # Get event lat/lon
-            raw = selected_event['Raw']
+        # Event handlers
+        def search_events_enhanced(start, end, min_mag, max_mag):
+            """Enhanced event search with better UI feedback"""
             try:
-                lat = float(raw.get('Latitude', 0))
-                lon = float(raw.get('Longtitude', 0))
-            except:
-                lat, lon = 34.05, -118.25  # Default to LA if coordinates are invalid
+                events, event_station_map, msg = get_event_station_phase_info(start, end, min_mag, max_mag)
+                
+                # Create enhanced event map
+                map_fig = create_event_map(events) if events else None
+                
+                # Create timeline
+                timeline_fig = create_event_timeline(events) if events else None
+                
+                # Format dropdown choices
+                choices = []
+                for i, event in enumerate(events):
+                    mag = event.get('Magnitude', 'Unknown')
+                    loc = event.get('Location', 'Unknown location')
+                    time_str = event.get('Time', 'Unknown time')[:16]  # Truncate seconds
+                    choices.append(f"M{mag} - {time_str} - {loc}")
+                
+                return (
+                    gr.update(choices=choices, value=None),  # event_dropdown
+                    events,  # events_state
+                    map_fig,  # event_map
+                    timeline_fig,  # event_timeline
+                    f"<h4>🎯 Found {len(events)} events</h4><p>{msg}</p>",  # event_info
+                    gr.update(choices=[], value=None)  # station_dropdown (reset)
+                )
+            except Exception as e:
+                logger.error(f"Search failed: {e}")
+                return gr.update(), [], None, None, f"<h4>❌ Search failed</h4><p>{str(e)}</p>", gr.update()
+        
+        def on_event_selection(event_choice, events):
+            """Handle event selection with enhanced feedback"""
+            if not event_choice or not events:
+                return None, None, gr.update(choices=[]), "<h4>No event selected</h4>"
             
-            # Get stations for this event
-            event_id = selected_event['Time']
-            stations = event_station_map.get(event_id, [])
+            try:
+                event_idx = next(i for i, event in enumerate(events) 
+                               if f"M{event.get('Magnitude', 'Unknown')}" in event_choice)
+                selected_event = events[event_idx]
+                
+                # Get stations
+                stations = get_stations_with_phases(selected_event['Time'])
+                station_choices = [f"{s} (CI network)" for s in stations] if stations else []
+                
+                # Create station map
+                station_map_fig = create_station_map(
+                    stations, 
+                    selected_event['Raw'].get('Latitude', 34.0), 
+                    selected_event['Raw'].get('Longitude', -118.0)
+                ) if stations else None
+                
+                # Enhanced event info
+                event_html = f"""
+                <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 15px; border-radius: 10px;">
+                    <h4>🎯 Selected Event</h4>
+                    <p><strong>📅 Time:</strong> {selected_event.get('Time', 'Unknown')}</p>
+                    <p><strong>📏 Magnitude:</strong> {selected_event.get('Magnitude', 'Unknown')}</p>
+                    <p><strong>📍 Location:</strong> {selected_event.get('Location', 'Unknown')}</p>
+                    <p><strong>🏗️ Stations available:</strong> {len(stations)}</p>
+                </div>
+                """
+                
+                return selected_event, station_map_fig, gr.update(choices=station_choices), event_html
+                
+            except Exception as e:
+                logger.error(f"Event selection failed: {e}")
+                return None, None, gr.update(choices=[]), f"<h4>❌ Selection failed</h4><p>{str(e)}</p>"
+        
+        def analyze_waveform_enhanced(selected_event, station_choice, bp_min, bp_max, hp):
+            """Enhanced waveform analysis with better error handling"""
+            if not selected_event or not station_choice:
+                return None, None, None, "", "⚠️ Please select both an event and station first."
             
-            # Create station dropdown choices
-            station_choices = stations[:20]  # Limit to first 20 stations
-            
-            # Create station map
-            station_fig = create_station_map(stations, lat, lon)
-            
-            return (
-                selected_event,
-                gr.update(choices=station_choices, value=None),
-                station_fig,
-            )
+            try:
+                station = station_choice.split()[0]  # Extract station code
+                logger.info(f"🔬 Analyzing: {selected_event['Time']} at {station}")
+                
+                # Call existing fetch_waveform logic but with enhanced returns
+                fig, picks_fig, prob_fig, debug_txt, info = fetch_waveform(
+                    selected_event, station, bp_min, bp_max, hp
+                )
+                
+                return fig, picks_fig, prob_fig, debug_txt, info
+                
+            except Exception as e:
+                logger.error(f"Waveform analysis failed: {e}")
+                error_msg = f"❌ Analysis failed: {str(e)}"
+                return None, None, None, "", error_msg
+        
+        # Wire up the enhanced event handlers
+        search_btn.click(
+            search_events_enhanced,
+            inputs=[start_date, end_date, min_magnitude, max_magnitude],
+            outputs=[event_dropdown, events_state, event_map, event_timeline, event_info, station_dropdown]
+        )
         
         event_dropdown.change(
-            on_event_select,
-            inputs=[event_dropdown, event_list_state, event_station_map_state],
-            outputs=[selected_event_state, station_dropdown, station_map]
+            on_event_selection,
+            inputs=[event_dropdown, events_state],
+            outputs=[selected_event_state, station_map, station_dropdown, event_info]
         )
         
+<<<<<<< HEAD
         # Waveform fetch callback
         def fetch_waveform(selected_event, station, bandpass_min, bandpass_max, highpass):
             if not selected_event or not station:
@@ -737,13 +849,14 @@ def create_app():
             return fig, picks_fig, prob_fig, debug_txt, info
 >>>>>>> 6e322cb (Add PhaseNet Probability Plotting and Debugging Features)
         
+=======
+>>>>>>> b9c546a (Enhance Gradio App UI and Functionality for Seismic Data Exploration)
         fetch_waveform_btn.click(
-            fetch_waveform,
+            analyze_waveform_enhanced,
             inputs=[selected_event_state, station_dropdown, bandpass_min, bandpass_max, highpass],
-            outputs=[plot_output, phasenet_plot, phasenet_prob_plot, phasenet_debug, data_info]
+            outputs=[waveform_plot, phasenet_picks_plot, phasenet_prob_plot, phasenet_debug, data_info]
         )
     
-    logger.info("✅ Next-gen SCEDC Gradio app with event selection ready.")
     return app
 
 # ---------------------------------------------------------------------------
