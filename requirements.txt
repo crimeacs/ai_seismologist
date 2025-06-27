@@ -5,9 +5,4 @@ matplotlib>=3.8.0
 numpy>=1.26.0
 pandas>=2.2.2
 plotly>=5.21.0
-<<<<<<< HEAD
-obspy-phasenet>=0.0.5
-seisbench>=0.6.0
-=======
 seisbench>=0.9.0
->>>>>>> c795fa4 (Integrate SeisBench PhaseNet Model for Enhanced Phase Picking)
