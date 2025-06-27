@@ -211,17 +211,17 @@ class SCEDCInterface:
             logger.error(f"   ✗ Error downloading station metadata: {e}")
             return None
 
-def plot_waveform(st, phase_arrivals=None, event_time=None, station=None):
-    """Create a matplotlib plot of the waveform data, overlaying phase arrivals if provided"""
-    logger.info("🎨 Creating waveform plot...")
+def plot_waveform_plotly(st, phase_arrivals=None, event_time=None, station=None):
+    """Return a Plotly figure with raw & filtered traces plus arrival markers."""
+    logger.info("🎨 Creating Plotly waveform plot…")
     
     if st is None or len(st) == 0:
         logger.warning("   ⚠ No data to plot")
         return None
     
     try:
-        # Apply seismic filtering to enhance signal quality
-        logger.info("   🔧 Applying seismic filters...")
+        # Apply filters (same as before) ------------------------------------
+        logger.info("   🔧 Applying seismic filters…")
         st_filtered = st.copy()
         
         for i, tr in enumerate(st_filtered):
@@ -245,108 +245,56 @@ def plot_waveform(st, phase_arrivals=None, event_time=None, station=None):
             # tr.filter('bandstop', freqmin=58, freqmax=62, corners=4, zerophase=True)
             # logger.info(f"     ✓ Applied notch filter (58-62 Hz)")
         
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10), sharex=True)
-        
-        # Plot original data
-        for i, tr in enumerate(st):
-            times = np.arange(len(tr.data)) / tr.stats.sampling_rate
-            ax1.plot(times, tr.data, label=f"{tr.stats.network}.{tr.stats.station}.{tr.stats.channel} (Raw)", 
-                    linewidth=0.8, alpha=0.7, color='gray')
-        
-        ax1.set_ylabel('Amplitude (counts)', fontsize=12)
-        ax1.set_title('Raw Seismic Data', fontsize=12, fontweight='bold')
-        ax1.legend(loc='upper right', fontsize=10)
-        ax1.grid(True, alpha=0.3)
-        
-        # Plot filtered data
-        for i, tr in enumerate(st_filtered):
-            times = np.arange(len(tr.data)) / tr.stats.sampling_rate
-            ax2.plot(times, tr.data, label=f"{tr.stats.network}.{tr.stats.station}.{tr.stats.channel} (Filtered)", 
-                    linewidth=0.8, color='blue')
-            logger.info(f"   ✓ Plotted trace {i+1}: {tr.stats.network}.{tr.stats.station}.{tr.stats.channel}")
-        
-        # Add estimated phase arrivals if not provided
-        if not phase_arrivals and event_time and station:
-            logger.info("   📍 Adding estimated phase arrivals based on typical travel times")
-            
-            # Estimate distance from event to station (rough approximation)
-            # For Southern California, typical distances are 50-200 km
-            estimated_distance_km = 100  # Default estimate
-            
-            # Typical P-wave velocity: ~6 km/s, S-wave velocity: ~3.5 km/s
-            p_velocity = 6.0  # km/s
-            s_velocity = 3.5  # km/s
-            
-            # Calculate travel times
-            p_travel_time = estimated_distance_km / p_velocity  # seconds
-            s_travel_time = estimated_distance_km / s_velocity  # seconds
-            
-            # Add some uncertainty and typical arrival patterns
-            phase_arrivals = [
-                {'phase': 'P', 'time': p_travel_time - 5, 'abs_time': f'~{p_travel_time-5:.1f}s'},
-                {'phase': 'S', 'time': s_travel_time - 5, 'abs_time': f'~{s_travel_time-5:.1f}s'},
-            ]
-            
-            logger.info(f"   📍 Estimated P arrival at ~{p_travel_time-5:.1f}s")
-            logger.info(f"   📍 Estimated S arrival at ~{s_travel_time-5:.1f}s")
-        
-        # Overlay phase arrivals on filtered plot
-        if phase_arrivals:
-            for phase in phase_arrivals:
-                t = phase['time']
-                label = phase['phase']
-                color = 'red' if label.upper() == 'P' else ('blue' if label.upper() == 'S' else 'green')
-                ax2.axvline(t, color=color, linestyle='--', linewidth=2, alpha=0.8, label=f"{label} arrival")
-                
-                # Add text label
-                y_pos = ax2.get_ylim()[1] * 0.9
-                ax2.text(t, y_pos, f"{label}", color=color, fontsize=14, fontweight='bold', 
-                       rotation=90, ha='right', va='top', bbox=dict(boxstyle="round,pad=0.3", 
-                       facecolor='white', alpha=0.8, edgecolor=color))
-        
-        # Add event origin time marker on both plots
+        # Determine time shift to align with origin (if known)
         if event_time:
-            for ax in [ax1, ax2]:
-                ax.axvline(0, color='black', linestyle='-', linewidth=3, alpha=0.7, label='Event Origin')
-                ax.text(0, ax.get_ylim()[1] * 0.95, 'EVENT\nORIGIN', color='black', fontsize=12, 
-                       fontweight='bold', ha='center', va='top', bbox=dict(boxstyle="round,pad=0.3", 
-                       facecolor='yellow', alpha=0.8))
+            try:
+                origin_dt = UTCDateTime(event_time)
+                shift_sec = st[0].stats.starttime - origin_dt
+            except Exception:
+                shift_sec = 0.0
+        else:
+            shift_sec = 0.0
+
+        # Build Plotly subplots --------------------------------------------
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03,
+                            subplot_titles=("Raw Seismic Data", "Filtered Data"))
+
+        # Raw traces
+        for tr in st:
+            times = (np.arange(len(tr.data)) / tr.stats.sampling_rate) - shift_sec
+            fig.add_trace(go.Scatter(x=times, y=tr.data,
+                                     name=f"{tr.stats.channel} (Raw)",
+                                     line=dict(width=0.8, color="gray"), opacity=0.7),
+                          row=1, col=1)
+
+        # Filtered traces
+        for tr in st_filtered:
+            times = (np.arange(len(tr.data)) / tr.stats.sampling_rate) - shift_sec
+            fig.add_trace(go.Scatter(x=times, y=tr.data,
+                                     name=f"{tr.stats.channel} (Filtered)",
+                                     line=dict(width=0.8, color="blue")),
+                          row=2, col=1)
         
-        # Add informative labels and title
-        ax2.set_xlabel('Time (seconds from event origin)', fontsize=12)
-        ax2.set_ylabel('Amplitude (counts)', fontsize=12)
-        
-        # Create informative title
-        title = f'Seismic Waveform: {st[0].stats.network}.{st[0].stats.station}.{st[0].stats.channel}'
-        if event_time:
-            title += f'\nEvent: {event_time}'
-        fig.suptitle(title, fontsize=14, fontweight='bold')
-        
-        # Add legend to filtered plot
-        ax2.legend(loc='upper right', fontsize=10)
-        
-        # Add grid
-        ax2.grid(True, alpha=0.3)
-        
-        # Add text box with waveform information
-        info_text = f"Sample Rate: {st[0].stats.sampling_rate} Hz\n"
-        info_text += f"Duration: {st[0].stats.endtime - st[0].stats.starttime:.1f} seconds\n"
-        info_text += f"Samples: {st[0].stats.npts:,}\n"
-        info_text += f"Filters Applied:\n"
-        info_text += f"  • Bandpass: 0.1-10 Hz\n"
-        info_text += f"  • High-pass: 0.5 Hz\n"
+        # Phase arrivals as vertical shapes in second subplot
         if phase_arrivals:
-            info_text += "\nPhase Arrivals (estimated):\n"
             for arr in phase_arrivals:
-                info_text += f"  {arr['phase']}: {arr['abs_time']}\n"
+                t = arr["time"]
+                col = "red" if arr["phase"].upper() == "P" else "blue"
+                fig.add_vline(x=t, line_width=2, line_dash="dash", line_color=col, row=2, col=1)
+
+        # Event origin vertical line
+        fig.add_vline(x=0, line_width=3, line_color="black", row="all", col=1)
+
+        fig.update_yaxes(title_text="Amplitude (counts)", row=1, col=1)
+        fig.update_yaxes(title_text="Amplitude (counts)", row=2, col=1)
+        fig.update_xaxes(title_text="Time (s from event origin)", row=2, col=1)
+
+        title_main = f"Seismic Waveform: {st[0].stats.network}.{st[0].stats.station}"  # simplified
+        if event_time:
+            title_main += f"<br>Event: {event_time}"
+        fig.update_layout(title=title_main, height=600, legend=dict(orientation="h"))
         
-        # Position text box in upper left of filtered plot
-        ax2.text(0.02, 0.98, info_text, transform=ax2.transAxes, fontsize=10,
-               verticalalignment='top', bbox=dict(boxstyle="round,pad=0.5", 
-               facecolor='lightblue', alpha=0.8))
-        
-        plt.tight_layout()
-        logger.info("   ✓ Waveform plot created successfully with filtering and phase arrivals")
+        logger.info("   ✓ Plotly waveform figure ready")
         return fig
         
     except Exception as e:
@@ -756,7 +704,7 @@ def create_app():
                     logger.error(f"PhaseNet annotate error for prob plot: {e}")
 
             # Create plot with custom filter parameters
-            fig = plot_waveform(st, phase_arrivals=phase_arrs, event_time=event_time, station=station)
+            fig = plot_waveform_plotly(st, phase_arrivals=phase_arrs, event_time=event_time, station=station)
             
             # Build separate PhaseNet picks figure
             picks_fig = plot_phasenet_picks(picks_for_plot, st, selected_event['Raw']) if picks_for_plot else None
