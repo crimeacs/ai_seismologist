@@ -33,11 +33,22 @@ try:
 except Exception:
     HAS_PHASENET = False
 
+try:
+    from seisbench.models import PhaseNet as SBPhaseNet  # type: ignore
+    HAS_SEISBENCH = True
+except Exception:
+    HAS_SEISBENCH = False
+
 # Log PhaseNet availability at import time
 if HAS_PHASENET:
     logger.info("🤖 PhaseNet available – ML phase picking enabled.")
 else:
     logger.warning("⚠️  PhaseNet NOT available – falling back to TauP estimates.")
+
+if HAS_SEISBENCH:
+    logger.info("🤖 SeisBench available – advanced models enabled.")
+else:
+    logger.warning("⚠️  SeisBench NOT available – skipping waveform classification.")
 
 class SCEDCInterface:
     """Interface for SCEDC data services"""
@@ -657,20 +668,37 @@ def create_app():
             if st is None:
                 return None, f"No waveform data available for {station}"
             
-            # PhaseNet picks first
+            # TauP arrivals as reference
+            taup_arrs = compute_phase_arrivals(selected_event["Raw"], "CI", station)
+
+            # Try SeisBench classification first
             phase_arrs: list[dict] = []
-            if HAS_PHASENET:
+            if HAS_SEISBENCH:
+                phase_arrs = compute_seisbench_arrivals(st)
+
+            # Fall back to obspy-phasenet
+            if not phase_arrs and HAS_PHASENET:
                 phase_arrs = compute_phasenet_arrivals(st, selected_event['Raw'], selected_event['Raw'].get('Network'), selected_event['Raw'].get('Station'))
-            # If no picks, use TauP estimate
+
+            # If still none, use TauP estimates for plotting
             if not phase_arrs:
-                phase_arrs = compute_phase_arrivals(selected_event["Raw"], "CI", station)
+                phase_arrs = taup_arrs
 
             # Create plot with custom filter parameters
             fig = plot_waveform(st, phase_arrivals=phase_arrs, event_time=event_time, station=station)
-            
+
+            # Compute delta between TauP and classified picks
+            delta_lines = []
+            phase_dict = {p["phase"].upper(): p for p in phase_arrs}
+            for t in taup_arrs:
+                phase = t["phase"].upper()
+                if phase in phase_dict:
+                    delta = phase_dict[phase]["time"] - t["time"]
+                    delta_lines.append(f"{phase} Δ: {delta:.2f}s")
+
             if fig is None:
                 return None, "Error creating waveform plot"
-            
+
             # Create info text
             info = f"Event: {event_time}\n"
             info += f"Station: {station}\n"
@@ -679,7 +707,9 @@ def create_app():
             info += f"Time window: {start_time} to {end_time}\n"
             info += f"Filters: Bandpass {bandpass_min}-{bandpass_max} Hz, Highpass {highpass} Hz\n"
             info += f"Traces: {len(st)}"
-            
+            if delta_lines:
+                info += "\n" + "; ".join(delta_lines)
+
             return fig, info
         
         fetch_waveform_btn.click(
@@ -777,6 +807,31 @@ def compute_phasenet_arrivals(st, event_raw: dict | None, network: str | None, s
         return arrivals
     except Exception as e:
         logger.error(f"PhaseNet picking error: {e}")
+        return []
+
+# ---------------------------------------------------------------------------
+# SeisBench PhaseNet picker (if available)
+# ---------------------------------------------------------------------------
+
+def compute_seisbench_arrivals(st):
+    """Run SeisBench PhaseNet classification on stream."""
+    if not HAS_SEISBENCH:
+        logger.info("SeisBench not installed; skipping classification.")
+        return []
+
+    try:
+        logger.info("🔮 Running SeisBench PhaseNet classifier...")
+        model = SBPhaseNet.from_pretrained("phasenet")
+        df = model.classify(st)
+        picks = []
+        for _, row in df.iterrows():
+            phase = str(row.get("phase", "")).upper()
+            if phase in ("P", "S"):
+                picks.append({"phase": phase, "time": float(row.get("time", 0.0)), "abs_time": f"{float(row.get('time', 0.0)):.1f}s"})
+        logger.info(f"🔮 SeisBench returned {len(picks)} picks")
+        return picks
+    except Exception as e:
+        logger.error(f"SeisBench classification error: {e}")
         return []
 
 if __name__ == "__main__":
