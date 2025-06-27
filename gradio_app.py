@@ -7,17 +7,17 @@ Interactive web interface for accessing Southern California Earthquake Data Cent
 import gradio as gr
 import requests
 import io
-import json
 import logging
 from datetime import datetime, timedelta
 from obspy import read, UTCDateTime
+from obspy.taup import TauPyModel
+from obspy.geodetics import locations2degrees
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from io import StringIO
-import xml.etree.ElementTree as ET
 import plotly.graph_objs as go
 from plotly.subplots import make_subplots
+import xml.etree.ElementTree as ET
 
 # Set up logging for debugging
 logging.basicConfig(
@@ -26,6 +26,18 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger(__name__)
+
+try:
+    from obspy_phasenet import phasenet as pn  # type: ignore
+    HAS_PHASENET = True
+except Exception:
+    HAS_PHASENET = False
+
+# Log PhaseNet availability at import time
+if HAS_PHASENET:
+    logger.info("🤖 PhaseNet available – ML phase picking enabled.")
+else:
+    logger.warning("⚠️  PhaseNet NOT available – falling back to TauP estimates.")
 
 class SCEDCInterface:
     """Interface for SCEDC data services"""
@@ -315,78 +327,6 @@ def plot_waveform(st, phase_arrivals=None, event_time=None, station=None):
         logger.error(f"   ✗ Error creating plot: {e}")
         return None
 
-def parse_event_data(event_text):
-    """Parse event catalog text data into a more readable format"""
-    logger.info("📝 Parsing event data...")
-    
-    if not event_text:
-        logger.warning("   ⚠ No event text to parse")
-        return "No event data available"
-    
-    try:
-        lines = event_text.strip().split('\n')
-        logger.info(f"   Processing {len(lines)} lines")
-        
-        if len(lines) < 2:
-            logger.warning("   ⚠ Insufficient data lines")
-            return event_text
-        
-        # Parse header and data
-        header_line = lines[0]
-        data_lines = lines[1:]
-        
-        # Extract column names from header
-        if '|' in header_line:
-            columns = [col.strip() for col in header_line.split('|')]
-        else:
-            columns = header_line.split()
-        
-        logger.info(f"   Found {len(columns)} columns: {columns}")
-        
-        # Parse data rows
-        events = []
-        for i, line in enumerate(data_lines):
-            if '|' in line:
-                values = [val.strip() for val in line.split('|')]
-            else:
-                values = line.split()
-            
-            if len(values) >= len(columns):
-                event_dict = {}
-                for j, col in enumerate(columns):
-                    if j < len(values):
-                        event_dict[col] = values[j]
-                events.append(event_dict)
-        
-        logger.info(f"   ✓ Successfully parsed {len(events)} events")
-        
-        if not events:
-            logger.warning("   ⚠ No events found in the specified time range")
-            return "No events found in the specified time range"
-        
-        # Create a summary
-        summary = f"Found {len(events)} events:\n\n"
-        for i, event in enumerate(events[:10]):  # Show first 10 events
-            event_id = event.get('EventID', 'N/A')
-            time = event.get('Time', 'N/A')
-            magnitude = event.get('Magnitude', 'N/A')
-            location = event.get('EventLocationName', 'N/A')
-            
-            summary += f"{i+1}. Event ID: {event_id}\n"
-            summary += f"   Time: {time}\n"
-            summary += f"   Magnitude: {magnitude}\n"
-            summary += f"   Location: {location}\n\n"
-        
-        if len(events) > 10:
-            summary += f"... and {len(events) - 10} more events"
-        
-        logger.info("   ✓ Event summary created")
-        return summary
-        
-    except Exception as e:
-        logger.error(f"   ✗ Error parsing event data: {e}")
-        return f"Error parsing event data: {e}"
-
 def get_event_station_phase_info(start, end, min_m, max_m):
     """Search events, return event list and for each event, stations with phase picks"""
     logger.info("🔍 Searching events and fetching station/phase info...")
@@ -423,13 +363,6 @@ def get_event_station_phase_info(start, end, min_m, max_m):
         event_station_map[event_id] = stations
     return event_list, event_station_map, ""
 
-def normalize_event_time(event_time):
-    """Convert event_time to ISO8601 (YYYY-MM-DDTHH:MM:SS)"""
-    t = event_time.replace('/', '-').replace(' ', 'T')
-    if '.' in t:
-        t = t.split('.')[0]
-    return t
-
 def get_stations_with_phases(event_time):
     """Get a list of common SCEDC stations that typically have data"""
     logger.info(f"🔎 Getting common SCEDC stations for event_time={event_time}")
@@ -450,19 +383,6 @@ def get_stations_with_phases(event_time):
     
     logger.info(f"   ✓ Returning {len(unique_stations)} unique SCEDC stations")
     return unique_stations
-
-def get_phase_arrivals_for_event_station(event_time, station, network):
-    return fetch_phase_arrivals(normalize_event_time(event_time), station, network)
-
-def fetch_phase_arrivals(event_time, station, network):
-    """Fetch phase arrivals (P, S) for a given event time and station from SCEDC event service (XML)"""
-    logger.info(f"🔎 Fetching phase arrivals for event_time={event_time}, station={station}, network={network}")
-    
-    # For now, return empty list since the SCEDC phase API is returning 400 errors
-    # The waveform data should still work without phase arrivals
-    logger.info(f"   ⚠ Phase arrivals not available due to SCEDC API limitations")
-    logger.info(f"   ✓ Waveform data will still be displayed")
-    return []
 
 def create_event_map(events):
     # events: list of dicts with keys 'Time', 'Magnitude', 'Location', 'Raw'
@@ -591,10 +511,10 @@ def create_app():
         with gr.Row():
             with gr.Column():
                 gr.Markdown("<div class='section-header'>📋 Event Selection</div>")
-                event_dropdown = gr.Dropdown(label="Select Event", choices=[], interactive=True, allow_custom_value=False, value=None)
+                event_dropdown = gr.Dropdown(label="Select Event", choices=[], value=None, interactive=True, allow_custom_value=False)
             with gr.Column():
                 gr.Markdown("<div class='section-header'>📍 Station Selection</div>")
-                station_dropdown = gr.Dropdown(label="Select Station", choices=[], interactive=True, allow_custom_value=False, value=None)
+                station_dropdown = gr.Dropdown(label="Select Station", choices=[], value=None, interactive=True, allow_custom_value=False)
                 fetch_waveform_btn = gr.Button("📊 Fetch Waveform", variant="primary")
         with gr.Row():
             with gr.Column():
@@ -617,28 +537,39 @@ def create_app():
         def do_search(start, end, minm, maxm):
             events, event_station_map, msg = get_event_station_phase_info(start, end, minm, maxm)
             if not events:
-                return msg, [], go.Figure(), go.Figure(), {}, None, go.Figure(), [], []
-            
-            # Create dropdown choices with event summaries
+                logger.info("No events found, returning empty choices.")
+                return (
+                    msg,
+                    gr.update(choices=[], value=None),
+                    go.Figure(),
+                    go.Figure(),
+                    {},
+                    None,
+                    go.Figure(),
+                    gr.update(choices=[], value=None),
+                    [],
+                )
             event_choices = []
             for i, event in enumerate(events):
                 time_str = event['Time']
                 mag = event['Magnitude']
                 location = event['Location']
-                # Create a readable summary for the dropdown
                 summary = f"{time_str} | M{mag} | {location[:50]}..."
                 event_choices.append(summary)
-            
-            logger.info(f"[do_search] Created {len(event_choices)} event choices for dropdown")
-            if event_choices:
-                logger.info(f"[do_search] First choice: {event_choices[0]}")
-            
+            logger.info(f"Event choices for dropdown: {event_choices}")
             map_fig = create_event_map(events)
             timeline_fig = create_event_timeline(events)
-            
-            # Return status, event choices, events list, and event station map
-            # Also reset station dropdown to empty
-            return f"✓ {len(events)} events loaded", event_choices, map_fig, timeline_fig, event_station_map, None, go.Figure(), [], events
+            return (
+                f"✓ {len(events)} events loaded",
+                gr.update(choices=event_choices, value=None),
+                map_fig,
+                timeline_fig,
+                event_station_map,
+                None,
+                go.Figure(),
+                gr.update(choices=[], value=None),
+                events,
+            )
         
         search_btn.click(
             do_search,
@@ -683,7 +614,11 @@ def create_app():
             # Create station map
             station_fig = create_station_map(stations, lat, lon)
             
-            return selected_event, station_choices, station_fig
+            return (
+                selected_event,
+                gr.update(choices=station_choices, value=None),
+                station_fig,
+            )
         
         event_dropdown.change(
             on_event_select,
@@ -722,8 +657,16 @@ def create_app():
             if st is None:
                 return None, f"No waveform data available for {station}"
             
+            # PhaseNet picks first
+            phase_arrs: list[dict] = []
+            if HAS_PHASENET:
+                phase_arrs = compute_phasenet_arrivals(st, selected_event['Raw'], selected_event['Raw'].get('Network'), selected_event['Raw'].get('Station'))
+            # If no picks, use TauP estimate
+            if not phase_arrs:
+                phase_arrs = compute_phase_arrivals(selected_event["Raw"], "CI", station)
+
             # Create plot with custom filter parameters
-            fig = plot_waveform(st, event_time=event_time, station=station)
+            fig = plot_waveform(st, phase_arrivals=phase_arrs, event_time=event_time, station=station)
             
             if fig is None:
                 return None, "Error creating waveform plot"
@@ -747,6 +690,94 @@ def create_app():
     
     logger.info("✅ Next-gen SCEDC Gradio app with event selection ready.")
     return app
+
+# ---------------------------------------------------------------------------
+# Phase arrival computation using TauP and station metadata
+# ---------------------------------------------------------------------------
+
+def compute_phase_arrivals(event_raw: dict, network: str, station: str):
+    """Return P & S arrival dicts using TauP (iasp91) given event & station."""
+    try:
+        ev_lat = float(event_raw.get("Latitude", 0))
+        ev_lon = float(event_raw.get("Longtitude", 0))
+        depth = float(event_raw.get("Depth/km", 10))  # km
+
+        # Fetch station metadata for coordinates
+        scedc = SCEDCInterface()
+        xml_txt = scedc.get_station_metadata(network, station)
+        if not xml_txt:
+            logger.warning("Station metadata unavailable, skipping TauP arrivals.")
+            return []
+        root = ET.fromstring(xml_txt)
+        sta_elem = root.find('.//{*}Station')
+        if sta_elem is None:
+            logger.warning("Station element not found in StationXML.")
+            return []
+        sta_lat = float(sta_elem.find('.//{*}Latitude').text)
+        sta_lon = float(sta_elem.find('.//{*}Longitude').text)
+
+        distance_deg = locations2degrees(ev_lat, ev_lon, sta_lat, sta_lon)
+        model = TauPyModel(model="iasp91")
+        arrivals = model.get_travel_times(source_depth_in_km=depth, distance_in_degree=distance_deg, phase_list=["P", "S"])
+
+        out = []
+        for arr in arrivals:
+            out.append({"phase": arr.name, "time": arr.time, "abs_time": f"{arr.time:.1f}s"})
+        logger.info(f"Computed TauP arrivals: {out}")
+        return out
+    except Exception as e:
+        logger.error(f"TauP arrival computation error: {e}")
+        return []
+
+# ---------------------------------------------------------------------------
+# PhaseNet picker
+# ---------------------------------------------------------------------------
+
+def compute_phasenet_arrivals(st, event_raw: dict | None, network: str | None, station: str | None):
+    """Run PhaseNet picker and keep P/S picks near TauP estimates (±4 s)."""
+    if not HAS_PHASENET:
+        logger.info("PhaseNet not installed; skipping ML picks.")
+        return []
+
+    if event_raw and network and station:
+        taup_arrs = compute_phase_arrivals(event_raw, network, station)
+        taup_dict = {a["phase"].upper(): a["time"] for a in taup_arrs}
+    else:
+        taup_dict = {}
+
+    try:
+        logger.info("🔮 Running PhaseNet picker...")
+        picks = pn.stream_predict(st, batch_size=20)
+        logger.info(f"🔮 PhaseNet returned {len(picks)} raw picks")
+
+        ref_time_trace = st[0].stats.starttime
+        # Event origin relative to trace start is 60 s (see fetch_waveform window)
+        origin_rel_in_trace = 60.0
+
+        selected = {}
+        tolerance = 4.0  # seconds around TauP
+
+        for p in picks:
+            phase = (p.phase_hint or "").upper()
+            if phase not in ("P", "S"):
+                continue
+            rel_trace = p.time - ref_time_trace  # sec since trace start
+            rel_event = rel_trace - origin_rel_in_trace  # sec since event origin
+            logger.debug(f"      pick: phase={phase} rel_event={rel_event:.2f}s")
+
+            if phase in taup_dict:
+                if abs(rel_event - taup_dict[phase]) > tolerance:
+                    continue  # outside acceptable window
+            # keep the first (earliest) valid pick per phase
+            if phase not in selected or rel_event < selected[phase]["time"]:
+                selected[phase] = {"phase": phase, "time": rel_event, "abs_time": f"{rel_event:.1f}s"}
+
+        arrivals = list(selected.values())
+        logger.info(f"🔮 PhaseNet filtered to {len(arrivals)} picks within ±{tolerance}s of TauP")
+        return arrivals
+    except Exception as e:
+        logger.error(f"PhaseNet picking error: {e}")
+        return []
 
 if __name__ == "__main__":
     logger.info("🌍 Starting SCEDC Interactive Gradio App...")
