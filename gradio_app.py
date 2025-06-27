@@ -554,6 +554,8 @@ def create_app():
         with gr.Row():
             plot_output = gr.Plot(label="Waveform Plot (with phases)")
             phasenet_plot = gr.Plot(label="PhaseNet Picks")
+            phasenet_prob_plot = gr.Plot(label="PhaseNet Probabilities")
+            phasenet_debug = gr.Textbox(label="PhaseNet Raw Picks", lines=8, interactive=False)
             data_info = gr.Textbox(label="Data Information", lines=8, interactive=False)
         # State variables
         event_list_state = gr.State([])
@@ -656,7 +658,7 @@ def create_app():
         # Waveform fetch callback
         def fetch_waveform(selected_event, station, bandpass_min, bandpass_max, highpass):
             if not selected_event or not station:
-                return None, None, "Please select an event and station first."
+                return None, None, None, "", "Please select an event and station first."
             
             logger.info(f"📊 Fetching waveform for event: {selected_event['Time']}, station: {station}")
             
@@ -669,7 +671,7 @@ def create_app():
                 end_time = dt + 300   # 5 minutes after
             except Exception as e:
                 logger.error(f"Error parsing event time: {e}")
-                return None, None, f"Error parsing event time: {e}"
+                return None, None, None, "", f"Error parsing event time: {e}"
             
             # Fetch waveform data
             scedc = SCEDCInterface()
@@ -683,7 +685,7 @@ def create_app():
             )
             
             if st is None:
-                return None, None, f"No waveform data available for {station}"
+                return None, None, None, "", f"No waveform data available for {station}"
             
             # TauP arrivals as reference
             taup_arrs = compute_phase_arrivals(selected_event["Raw"], "CI", station)
@@ -719,6 +721,8 @@ def create_app():
 
 =======
             picks_for_plot = []
+            picks_debug_lines: list[str] = []
+            prob_fig = None
             if HAS_PHASENET:
                 phase_arrs = compute_phasenet_arrivals(
                     st,
@@ -730,8 +734,26 @@ def create_app():
                 try:
                     classify_out = PN_MODEL.classify(st, batch_size=64)
                     picks_for_plot = getattr(classify_out, "picks", [])
+                    # build debug text
+                    for p in picks_for_plot:
+                        try:
+                            abs_time = p.peak_time.isoformat() if p.peak_time else "NA"
+                            prob = getattr(p, "probability", None)
+                            picks_debug_lines.append(
+                                f"{p.phase}  | abs: {abs_time}  | prob: {prob:.2f}" if prob is not None else f"{p.phase} | abs: {abs_time}"
+                            )
+                        except Exception:
+                            continue
+
                 except Exception as e:
                     logger.error(f"PhaseNet classify error for plotting: {e}")
+
+                # Probability time-series via annotate
+                try:
+                    ann_stream = PN_MODEL.annotate(st, batch_size=64)
+                    prob_fig = plot_phasenet_probabilities(ann_stream, selected_event['Raw'])
+                except Exception as e:
+                    logger.error(f"PhaseNet annotate error for prob plot: {e}")
 
             # Create plot with custom filter parameters
             fig = plot_waveform(st, phase_arrivals=phase_arrs, event_time=event_time, station=station)
@@ -740,7 +762,7 @@ def create_app():
             picks_fig = plot_phasenet_picks(picks_for_plot, st, selected_event['Raw']) if picks_for_plot else None
             
             if fig is None:
-                return None, None, "Error creating waveform plot"
+                return None, None, None, "", "Error creating waveform plot"
             
 >>>>>>> c795fa4 (Integrate SeisBench PhaseNet Model for Enhanced Phase Picking)
             # Create info text
@@ -758,13 +780,19 @@ def create_app():
             return fig, info
 =======
             
+<<<<<<< HEAD
             return fig, picks_fig, info
 >>>>>>> c795fa4 (Integrate SeisBench PhaseNet Model for Enhanced Phase Picking)
+=======
+            debug_txt = "\n".join(picks_debug_lines) if picks_debug_lines else "(no raw picks)"
+
+            return fig, picks_fig, prob_fig, debug_txt, info
+>>>>>>> 6e322cb (Add PhaseNet Probability Plotting and Debugging Features)
         
         fetch_waveform_btn.click(
             fetch_waveform,
             inputs=[selected_event_state, station_dropdown, bandpass_min, bandpass_max, highpass],
-            outputs=[plot_output, phasenet_plot, data_info]
+            outputs=[plot_output, phasenet_plot, phasenet_prob_plot, phasenet_debug, data_info]
         )
     
     logger.info("✅ Next-gen SCEDC Gradio app with event selection ready.")
@@ -959,6 +987,55 @@ def plot_phasenet_picks(picks: list, st, event_raw: dict | None):
         logger.error(f"Error plotting PhaseNet picks: {e}")
         return None
 >>>>>>> c795fa4 (Integrate SeisBench PhaseNet Model for Enhanced Phase Picking)
+
+# ---------------------------------------------------------------------------
+# Probability plot helper
+# ---------------------------------------------------------------------------
+
+def plot_phasenet_probabilities(ann_stream, event_raw):
+    """Plot P & S probability traces returned by PN_MODEL.annotate."""
+    try:
+        import matplotlib.pyplot as plt
+
+        # Origin reference for x-axis
+        if event_raw and event_raw.get("Time"):
+            try:
+                origin_time = UTCDateTime(event_raw["Time"])
+            except Exception:
+                origin_time = None
+        else:
+            origin_time = None
+
+        p_tr = None
+        s_tr = None
+        for tr in ann_stream:
+            ch = tr.stats.channel.upper()
+            if "P" in ch and p_tr is None:
+                p_tr = tr
+            elif "S" in ch and s_tr is None:
+                s_tr = tr
+
+        fig, ax = plt.subplots(figsize=(12, 3))
+        for tr, col, lab in ((p_tr, "red", "P prob"), (s_tr, "blue", "S prob")):
+            if tr is None:
+                continue
+            times = np.arange(tr.stats.npts) / tr.stats.sampling_rate
+            if origin_time is not None:
+                # shift so that 0 = event origin
+                delta = (tr.stats.starttime - origin_time)
+                times = times + delta
+            ax.plot(times, tr.data, color=col, alpha=0.8, label=lab)
+
+        ax.set_xlabel("Time (s from origin)")
+        ax.set_ylabel("Probability")
+        ax.set_ylim(0, 1)
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        fig.tight_layout()
+        return fig
+    except Exception as e:
+        logger.error(f"Prob plot error: {e}")
+        return None
 
 if __name__ == "__main__":
     logger.info("🌍 Starting SCEDC Interactive Gradio App...")
