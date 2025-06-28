@@ -1,0 +1,6 @@
+@@
+-            for ph, t in claude_picks.items():
+-                debug_lines.append(f"CL {ph}  {t:.2f}s")
++            debug_lines.append(f"CL RAW {claude_raw}")
++            for ph, t in claude_picks.items():
++                debug_lines.append(f"CL {ph}  {t:.2f}s") 

@@ -1,64 +1,71 @@
-# SCEDC Interactive Seismic Explorer
+# SCEDC Seismic Data Explorer
 
-A Gradio web application for searching Southern California earthquake events, visualising them on an interactive map/timeline, and fetching station waveforms with basic filters.
+Interactive web application for browsing and analysing Southern California Earthquake Data Center (SCEDC) events.
 
-![screenshot](docs/screenshot.png)
+Key features
+------------
+* 🌐  Gradio front-end for an instant in-browser experience.
+* 🗺️  Event & station visualisation on Mapbox and timeline plots.
+* 🔄  60-second three-component waveform download per station.
+* ⚡️  Real-time phase picking:
+  * 𝐓𝐚𝐮𝐏 – theoretical P & S arrivals (IASP91).
+  * **PhaseNet** (SeisBench) – machine-learning picks.
+  * **Claude "AI Seismologist"** – Gen-AI picks via Anthropic API.
+* 📊  Plot overlays with source-specific styling (TauP dashed, PhaseNet solid, Claude dotted).
+* 🪄  Debug panel with raw inputs/outputs for PhaseNet & Claude.
 
----
-
-## Features
-
-* Search SCEDC event catalogue by date and magnitude.
-* Interactive Plotly map & timeline visualisation of events.
-* Dropdown-based event & station selection (Gradio-friendly).
-* Waveform download via FDSN web service (ObsPy backend).
-* Basic preprocessing & filter controls (band-pass, high-pass).
-* Phase arrival markers (simple estimates, placeholder for future picks).
-
----
-
-## Quickstart
-
+Quick start
+-----------
 ```bash
-# Clone & enter repository
-$ git clone https://github.com/your-org/scedc-explorer.git
-$ cd scedc-explorer
+# Create and activate a virtualenv (recommended)
+python -m venv .venv
+source .venv/bin/activate
 
-# Create virtual env (optional)
-$ python -m venv .venv && source .venv/bin/activate
+# Install dependencies → requirements.txt
+pip install -r requirements.txt
 
-# Install deps
-$ pip install -r requirements.txt
+# Add your Anthropic key (or put it in a .env file – see below)
+export ANTHROPIC_API_KEY="sk-ant-…"
 
-# Run the app
-$ python run_gradio_app.py
+# Launch the app
+python gradio_app.py
+```
+The interface will be available at http://localhost:7860 by default.
+
+Environment variables (.env)
+---------------------------
+The app automatically loads a `.env` file in the project root at start-up.
+Minimum content:
+```dotenv
+# .env
+ANTHROPIC_API_KEY=sk-ant-…
+```
+You can still override the key at runtime via the sidebar "🤖 Claude Settings".
+
+Repository layout
+-----------------
+```
+│ README.md            ← this file
+│ requirements.txt     ← Python dependencies
+│ gradio_app.py        ← Main application
+│ claude_picker.py     ← Claude integration helper
+│ run_gradio_app.py    ← thin wrapper (optional)
+└── tests/             ← pytest unit tests (TBD)
 ```
 
-Open http://localhost:7860 in your browser.
+Development & contributing
+-------------------------
+1. Follow *Quick start* above using a virtualenv.
+2. Run `python -m pytest` to execute tests (add more in `tests/`).
+3. Ensure `ruff` / `black` are happy:
+   ```bash
+   ruff check .
+   black --check .
+   ```
+4. Create a feature branch, commit & open a pull request.
 
----
-
-## Project layout
-
-```
-.
-├── gradio_app.py        # core Blocks app
-├── run_gradio_app.py    # launcher script w/ dep checks
-├── requirements.txt
-├── README.md
-└── .gitignore
-```
-
----
-
-## Contributing
-
-1. Create a feature branch: `git checkout -b feature/awesome`  
-2. Commit your changes.  
-3. Push and open a PR.
-
----
-
-## License
-
-MIT 
+House-keeping
+-------------
+* All waveform processing is limited to a 60 s window (−10 s → +50 s around the event origin).
+* The Claude system prompt lives in `claude_picker.py::SYSTEM_PROMPT`; edit via the UI if required.
+* Debug logs (INFO level) are verbose by design; pipe output when running in CI. 

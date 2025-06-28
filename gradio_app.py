@@ -20,6 +20,21 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import xml.etree.ElementTree as ET
+import os
+
+# Claude picker utilities
+try:
+    from claude_picker import (
+        stream_to_ascii as _cp_stream_to_ascii,
+        call_claude as _cp_call_claude,
+        compute_error as _cp_compute_error,
+        SYSTEM_PROMPT as CLAUDE_DEFAULT_PROMPT,
+    )
+    HAS_CLAUDE = True
+except Exception as _e:
+    CLAUDE_DEFAULT_PROMPT = ""
+    HAS_CLAUDE = False
+    logger.warning(f"⚠️  Claude picker utilities NOT available – reason: {_e}")
 
 # Set up logging for debugging
 logging.basicConfig(
@@ -48,6 +63,15 @@ except Exception as e:  # pragma: no cover – missing optional dep
     HAS_PHASENET = False
     PN_MODEL = None  # type: ignore
     logger.warning(f"⚠️  PhaseNet via SeisBench NOT available – reason: {e}")
+
+# Load environment variables from a .env file if present
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except Exception:
+    # python-dotenv not installed – proceed quietly; env vars must be set externally
+    pass
 
 class SCEDCInterface:
     """Interface for SCEDC data services"""
@@ -300,12 +324,21 @@ def plot_waveform_plotly(
                                      line=dict(width=0.8, color="blue")),
                           row=2, col=1)
         
-        # Phase arrivals as vertical lines in second subplot
+        # Phase arrivals from different sources (TauP, PhaseNet, Claude)
         if phase_arrivals:
+            dash_by_src = {"TP": "dash", "PN": "solid", "CL": "dot"}
             for arr in phase_arrivals:
                 t = arr["time"]
                 col = "red" if arr["phase"].upper() == "P" else "blue"
-                fig.add_vline(x=t, line_width=2, line_dash="dash", line_color=col, row=2, col=1)
+                dash = dash_by_src.get(arr.get("src", ""), "dash")
+                fig.add_vline(
+                    x=t,
+                    line_width=2,
+                    line_dash=dash,
+                    line_color=col,
+                    row=2,
+                    col=1,
+                )
 
         # Event origin vertical line
         fig.add_vline(x=0, line_width=3, line_color="black", row="all", col=1)
@@ -583,6 +616,20 @@ def create_app():
                     bandpass_max = gr.Number(label="Bandpass Max (Hz)", value=10.0, minimum=0.1, maximum=50)
                     highpass = gr.Number(label="High-pass (Hz)", value=0.5, minimum=0.01, maximum=10)
 
+                # Claude picker settings -----------------------------------
+                with gr.Accordion("🤖 Claude Settings", open=False):
+                    claude_api_key_tb = gr.Textbox(
+                        label="Anthropic API Key",
+                        placeholder="sk-ant-...",
+                        type="password",
+                    )
+                    claude_system_prompt_tb = gr.Textbox(
+                        label="System Prompt (edit if needed)",
+                        value=CLAUDE_DEFAULT_PROMPT,
+                        lines=14,
+                        interactive=True,
+                    )
+
                 fetch_waveform_btn = gr.Button("📊 Analyze Waveform", variant="primary", size="lg")
 
                 event_info = gr.HTML(elem_classes=["info-panel"])
@@ -665,17 +712,17 @@ def create_app():
                 logger.error(f"Event selection failed: {e}")
                 return None, None, gr.update(choices=[]), f"<h4>❌ Selection failed</h4><p>{str(e)}</p>"
         
-        def analyze_waveform_enhanced(selected_event, station_choice, bp_min, bp_max, hp):
+        def analyze_waveform_enhanced(selected_event, station_choice, bp_min, bp_max, hp, claude_api_key, claude_prompt):
             """Enhanced waveform analysis with better error handling"""
             if not selected_event:
-                return None, "", "⚠️ Please select an event first."
+                return None, gr.update(visible=False, value=""), "⚠️ Please select an event first."
 
             # If user did not pick a station, automatically select the first available one
             if not station_choice:
                 candidate_stations = get_stations_with_phases(selected_event["Time"])
                 stations_avail = filter_stations_with_waveforms(selected_event["Time"], candidate_stations)
                 if not stations_avail:
-                    return None, "", "⚠️ No stations with data found for this event."
+                    return None, gr.update(visible=False, value=""), "⚠️ No stations with data found for this event."
                 station_choice = f"{stations_avail[0]} (CI network)"
 
             try:
@@ -683,16 +730,23 @@ def create_app():
                 logger.info(f"🔬 Analyzing: {selected_event['Time']} at {station}")
                 
                 # Call existing fetch_waveform logic but with enhanced returns
-                fig, debug_txt, info = fetch_waveform(
-                    selected_event, station, bp_min, bp_max, hp
+                wave_fig, debug_txt_str, info_txt = fetch_waveform(
+                    selected_event,
+                    station,
+                    bp_min,
+                    bp_max,
+                    hp,
+                    claude_api_key=claude_api_key,
+                    claude_system_prompt=claude_prompt,
                 )
                 
-                return fig, debug_txt, info
+                debug_update = gr.update(value=debug_txt_str, visible=bool(debug_txt_str))
+                return wave_fig, debug_update, info_txt
                 
             except Exception as e:
                 logger.error(f"Waveform analysis failed: {e}")
                 error_msg = f"❌ Analysis failed: {str(e)}"
-                return None, "", error_msg
+                return None, gr.update(visible=False, value=""), error_msg
         
         # Wire up the enhanced event handlers
         search_btn.click(
@@ -709,7 +763,7 @@ def create_app():
         
         fetch_waveform_btn.click(
             analyze_waveform_enhanced,
-            inputs=[selected_event_state, station_dropdown, bandpass_min, bandpass_max, highpass],
+            inputs=[selected_event_state, station_dropdown, bandpass_min, bandpass_max, highpass, claude_api_key_tb, claude_system_prompt_tb],
             outputs=[waveform_plot, phasenet_debug, data_info]
         )
 
@@ -729,7 +783,7 @@ def create_app():
             # --- Event search ---
             events, _, _ = get_event_station_phase_info(start_default, end_default, min_mag, max_mag)
             if not events:
-                return [gr.update(), [], None, None, "<h4>No default events</h4>", gr.update(), None, None, None, None, "", ""]
+                return [gr.update(), [], None, None, None, "", "No default events"]
 
             first_event = events[0]
             choices = []
@@ -748,12 +802,14 @@ def create_app():
 
             # --- Initial waveform analysis ---
             if first_station_label:
-                wave_fig, debug_txt, info_txt = fetch_waveform(
-                    first_event, stations[0], bandpass_min.value, bandpass_max.value, highpass.value
+                wave_fig, debug_txt_str, info_txt = fetch_waveform(
+                    first_event, stations[0], bandpass_min.value, bandpass_max.value, highpass.value, claude_api_key_tb.value, claude_system_prompt_tb.value
                 )
+                debug_update = gr.update(value=debug_txt_str, visible=bool(debug_txt_str))
             else:
                 wave_fig = None
-                debug_txt = info_txt = ""
+                debug_update = gr.update(visible=False, value="")
+                info_txt = ""
 
             return [
                 gr.update(choices=choices, value=choices[0]),  # event_dropdown
@@ -761,7 +817,7 @@ def create_app():
                 combined_map_fig,
                 first_event,  # selected_event_state
                 wave_fig,
-                debug_txt,
+                debug_update,
                 info_txt,
             ]
 
@@ -1111,47 +1167,134 @@ def create_combined_map(events, selected_event, stations, selected_station=None)
 # Fetch waveform helper (missing implementation)
 # ---------------------------------------------------------------------------
 
-def fetch_waveform(selected_event: dict, station: str, bp_min: float, bp_max: float, hp: float):
-    """Download waveform, run TauP + PhaseNet, and produce figures & debug text."""
+def fetch_waveform(
+    selected_event: dict,
+    station: str,
+    bp_min: float,
+    bp_max: float,
+    hp: float,
+    claude_api_key: str | None,
+    claude_system_prompt: str | None,
+):
+    """Download waveform, run TauP, PhaseNet and optional Claude picker.
 
-    logger.info(f"📊 Fetching waveform for event: {selected_event['Time']}, station: {station}")
+    Returns
+    -------
+    tuple
+        (Plotly Figure | None, debug_text, info_text)
+    """
+
+    logger.info(
+        f"📊 Fetching waveform for event: {selected_event['Time']}, station: {station}"
+    )
 
     scedc = SCEDCInterface()
 
-    # Build time window: origin ± 3 min
+    # Build 60-second window: 10 s before origin to 50 s after
     origin = UTCDateTime(selected_event["Time"])
-    start = origin - 60  # 1 min before
-    end = origin + 300   # 5 min after
+    start = origin - 10  # 10 s before
+    end = origin + 50    # 50 s after (60 s window)
 
     st = scedc.get_waveform_data(start.isoformat(), end.isoformat(), "CI", station, "BH?")
     if st is None or len(st) == 0:
         msg = f"⚠️ No waveform data for CI.{station} in this window."
-        return None, None, None, "", msg
+        return None, "", msg
 
-    # Theoretical arrivals (TauP)
+    # --------------------- TauP arrivals --------------------------------
     taup_arrivals = compute_phase_arrivals(selected_event["Raw"], "CI", station)
 
-    # PhaseNet picks / probabilities
+    # --------------------- PhaseNet picker ------------------------------
     pn_picks = []
-    debug_lines = []
+    pn_filtered: list[dict] = []
+    ann_stream = None
+    debug_lines: list[str] = []
+
     if HAS_PHASENET and PN_MODEL is not None:
         try:
             ann_stream = PN_MODEL.annotate(st, batch_size=64)
             classify_out = PN_MODEL.classify(st, batch_size=64)
             pn_picks = getattr(classify_out, "picks", [])
 
-            # Debug lines ----------------------------------------------------
             for p in pn_picks:
-                prob_val = getattr(p, 'probability', getattr(p, 'prob', 0.0))
-                debug_lines.append(f"{p.phase}  {p.peak_time}  prob={prob_val:.2f}")
+                prob_val = getattr(p, "probability", getattr(p, "prob", 0.0))
+                debug_lines.append(
+                    f"PN {p.phase}  {p.peak_time}  prob={prob_val:.2f}"
+                )
         except Exception as e:
             logger.error(f"PhaseNet annotate/classify error: {e}")
 
-    # Filter PhaseNet picks near TauP
     pn_filtered = compute_phasenet_arrivals(st, selected_event["Raw"], "CI", station)
 
-    # Merge arrivals: PN first then TauP for remainders
-    arrivals_plot = pn_filtered or taup_arrivals
+    # --------------------- Claude picker --------------------------------
+    claude_picks: dict[str, float] = {}
+    claude_arrivals: list[dict] = []
+    claude_err: dict[str, float] = {}
+
+    # Determine if we should attempt Claude pick: either a key was provided
+    # by the user or an environment variable exists.
+    _env_key = os.getenv("ANTHROPIC_API_KEY", "")
+    if HAS_CLAUDE and (claude_api_key or _env_key):
+        try:
+            # Feed Claude only the first 60 s of the three-component stream.
+            ascii_wf = _cp_stream_to_ascii(st, max_seconds=60.0)
+            logger.info("Claude input ASCII (truncated to 400 chars): %s", ascii_wf[:400])
+            debug_lines.append("CL INPUT >>>\n" + ascii_wf[:400] + ("…" if len(ascii_wf) > 400 else ""))
+            claude_raw = _cp_call_claude(
+                ascii_wf,
+                api_key=claude_api_key if claude_api_key else None,
+                system_prompt=claude_system_prompt,
+            )
+
+            logger.info(f"Claude raw response: {claude_raw}")
+            debug_lines.append(f"CL RAW {claude_raw}")
+
+            def _maybe_add(ph_key: str, phase: str):
+                val = claude_raw.get(ph_key)
+                try:
+                    val_f = float(val)
+                except Exception:
+                    return
+                claude_picks[phase] = val_f
+
+            _maybe_add("P_time", "P")
+            _maybe_add("S_time", "S")
+
+            if not claude_picks:
+                for k, v in claude_raw.items():
+                    if k.upper() in ("P", "S"):
+                        try:
+                            claude_picks[k.upper()] = float(v)
+                        except Exception:
+                            continue
+
+            claude_arrivals = [
+                {"phase": ph, "time": t, "abs_time": f"{t:.1f}s"}
+                for ph, t in claude_picks.items()
+            ]
+
+            claude_err = (
+                _cp_compute_error(claude_picks, pn_filtered) if pn_filtered else {}
+            )
+
+            for ph, t in claude_picks.items():
+                debug_lines.append(f"CL {ph}  {t:.2f}s")
+        except Exception as e:
+            logger.error(f"Claude picker error: {e}")
+
+    # --------------------- Prepare arrivals for plotting ----------------
+    # Tag each arrival with its origin source for styling in the plot.
+    for arr in taup_arrivals:
+        arr["src"] = "TP"  # TauP theoretical
+    for arr in pn_filtered:
+        arr["src"] = "PN"  # PhaseNet ML
+    for arr in claude_arrivals:
+        arr["src"] = "CL"  # Claude
+
+    # Combine arrivals for plotting – show TauP *only* when no ML/gen-AI picks exist
+    if pn_filtered or claude_arrivals:
+        arrivals_plot = pn_filtered + claude_arrivals
+    else:
+        arrivals_plot = taup_arrivals
 
     wave_fig = plot_waveform_plotly(
         st,
@@ -1162,12 +1305,19 @@ def fetch_waveform(selected_event: dict, station: str, bp_min: float, bp_max: fl
         ann_stream=ann_stream,
     )
 
+    # --------------------- Info text ------------------------------------
     info_lines = [
         f"Traces: {len(st)}",
         f"Sampling rate: {st[0].stats.sampling_rate} Hz",
         f"Duration: {st[0].stats.npts / st[0].stats.sampling_rate:.1f} s",
         f"PhaseNet picks: {len(pn_picks)} (filtered: {len(pn_filtered)})",
     ]
+
+    if claude_picks:
+        info_lines.append(f"Claude picks: {len(claude_picks)}")
+        if claude_err:
+            err_str = ", ".join(f"{ph}:{err:.2f}s" for ph, err in claude_err.items())
+            info_lines.append(f"Claude vs PhaseNet Δt: {err_str}")
 
     return wave_fig, "\n".join(debug_lines), "\n".join(info_lines)
 
@@ -1194,8 +1344,8 @@ def filter_stations_with_waveforms(event_time: str, stations: list[str], max_che
     if origin is None:
         return stations  # fallback – cannot determine window
 
-    start = origin - 30  # 30 s before
-    end = origin + 150   # 2.5 min after
+    start = origin - 10  # 10 s before
+    end = origin + 50    # 50 s after (60 s window)
 
     available: list[str] = []
     for sta in stations[:max_checks]:

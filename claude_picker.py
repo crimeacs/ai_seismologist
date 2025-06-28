@@ -18,7 +18,7 @@ except Exception:  # pragma: no cover - missing dependency at runtime
 
 
 SYSTEM_PROMPT = """
-You are “AI Seismologist”, a deterministic specialist that identifies
+You are "AI Seismologist", a deterministic specialist that identifies
 P- and S-wave arrival times on a three-component waveform.
 
 ##### ❶  INPUT FORMAT
@@ -84,19 +84,62 @@ def stream_to_ascii(
     return "\n".join(lines)
 
 
-def call_claude(waveform_ascii: str, api_key: str) -> Dict[str, float]:
-    """Send the waveform to Claude and parse the JSON response."""
-    if anthropic is None:
-        raise RuntimeError("anthropic package not available")
+def call_claude(
+    waveform_ascii: str,
+    api_key: str | None = None,
+    system_prompt: str | None = None,
+) -> Dict[str, float]:
+    """Send the waveform ASCII text to Claude and return the parsed JSON.
 
-    client = anthropic.Anthropic(api_key=api_key)
+    Parameters
+    ----------
+    waveform_ascii : str
+        Multi-line ASCII string produced by :func:`stream_to_ascii`.
+    api_key : str, optional
+        Anthropic API key starting with ``"sk-"``.
+    system_prompt : str, optional
+        Custom system prompt.  If *None* (default) the built-in
+        :data:`SYSTEM_PROMPT` is used.
+    """
+
+    if anthropic is None:  # pragma: no cover – optional dependency
+        raise RuntimeError("anthropic package not available; install `anthropic`.")
+
+    # Instantiate client – if *api_key* is empty/None use env var.
+    if api_key:
+        client = anthropic.Anthropic(api_key=api_key)
+    else:
+        client = anthropic.Anthropic()
+
     msg = client.messages.create(
         model="claude-sonnet-4-20250514",
-        system=SYSTEM_PROMPT,
+        max_tokens=256,
+        system=system_prompt or SYSTEM_PROMPT,
         messages=[{"role": "user", "content": waveform_ascii}],
     )
-    text = msg.content[0].text if msg.content else ""
-    return json.loads(text)
+    text = msg.content[0].text if msg.content else "{}"
+
+    # Some models may wrap the JSON in markdown code fences; attempt robust extraction.
+    text_stripped = text.strip()
+    if text_stripped.startswith("```"):
+        # Remove first & last code fence if present
+        parts = text_stripped.split("```", 2)
+        if len(parts) >= 3:
+            text_stripped = parts[1].strip()
+
+    # Locate the first JSON object if there is surrounding text
+    if not (text_stripped.startswith("{") and text_stripped.rstrip().endswith("}")):
+        import re
+        match = re.search(r"\{[\s\S]*?\}", text_stripped)
+        if match:
+            text_stripped = match.group(0)
+
+    try:
+        data = json.loads(text_stripped)
+    except Exception:
+        # Final fallback – empty dict
+        data = {}
+    return data
 
 
 def compute_error(
